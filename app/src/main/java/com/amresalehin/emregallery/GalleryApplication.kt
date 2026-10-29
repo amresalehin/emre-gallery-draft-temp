@@ -71,6 +71,7 @@ class GalleryApplication : Application() {
         super.onTrimMemory(level)
         runCatching {
             val coilCache = Coil.imageLoader(this).memoryCache
+            com.amresalehin.emregallery.data.PreparedThumbnailCache.trimMemory(level)
             when {
                 level >= TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE -> {
                     coilCache?.clear()
@@ -88,6 +89,7 @@ class GalleryApplication : Application() {
         super.onLowMemory()
         runCatching {
             Coil.imageLoader(this).memoryCache?.clear()
+            com.amresalehin.emregallery.data.PreparedThumbnailCache.clearMemory()
             com.amresalehin.emregallery.face.FaceThumbnailHelper.clearCache()
         }
     }

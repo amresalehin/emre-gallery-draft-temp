@@ -429,14 +429,14 @@ fun MosaicMediaItem(
 
     val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val itemScale = if (isPressed) 0.95f else 1f
 
     Box(
         modifier = modifier
             .trackThumbnailBounds(item.uri)
             .graphicsLayer {
-                scaleX = itemScale
-                scaleY = itemScale
+                val scale = if (isPressed) 0.95f else 1f
+                scaleX = scale
+                scaleY = scale
             }
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -523,7 +523,6 @@ fun MediaGridItem(
 
     val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
-    val itemScale = if (isPressed) 0.95f else 1f
 
     Box(
         modifier = Modifier
@@ -531,8 +530,9 @@ fun MediaGridItem(
             .aspectRatio(aspect)
             .trackThumbnailBounds(item.uri)
             .graphicsLayer {
-                scaleX = itemScale
-                scaleY = itemScale
+                val scale = if (isPressed) 0.95f else 1f
+                scaleX = scale
+                scaleY = scale
             }
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)

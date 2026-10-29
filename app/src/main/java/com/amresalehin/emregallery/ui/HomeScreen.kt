@@ -136,35 +136,17 @@ fun HomeScreen(
             }
         }
     }
-    val predictivePrefetchIndex = remember(predictivePrefetchRows) {
-        predictivePrefetchRows.mapIndexed { index, row -> row.first to index }.toMap()
-    }
     var observedScrollDirection by remember(listState) { mutableIntStateOf(1) }
 
-    val predictivePrefetchConnection = remember(listState, predictivePrefetchRows, predictivePrefetchIndex) {
+    val predictivePrefetchConnection = remember(listState, predictivePrefetchRows) {
         object : NestedScrollConnection {
             override suspend fun onPreFling(available: Velocity): Velocity {
                 val velocityY = available.y
-                if (abs(velocityY) < 1200f || predictivePrefetchRows.isEmpty()) return Velocity.Zero
+                if (abs(velocityY) < 1400f || predictivePrefetchRows.isEmpty()) return Velocity.Zero
 
-                // Use the direction observed during the drag rather than relying on platform-specific
-                // fling-velocity sign conventions. The velocity magnitude still estimates travel distance.
                 val forward = observedScrollDirection > 0
-                val visibleRowInfos = listState.layoutInfo.visibleItemsInfo.filter {
-                    predictivePrefetchIndex.containsKey(it.key.toString())
-                }
-                val visibleIndices = visibleRowInfos.mapNotNull {
-                    predictivePrefetchIndex[it.key.toString()]
-                }
-                if (visibleIndices.isEmpty()) return Velocity.Zero
-
-                val anchor = if (forward) visibleIndices.maxOrNull()!! else visibleIndices.minOrNull()!!
-                val averageRowHeight = visibleRowInfos.map { it.size.toFloat() }
-                    .average().toFloat().coerceAtLeast(1f)
-                // Estimate travel from velocity, then cap work to a bounded window. The fling itself
-                // remains native; this only moves likely destination thumbnails to the worker's front.
-                val predictedRows = (abs(velocityY) * 0.32f / averageRowHeight)
-                    .roundToInt().coerceIn(4, 36)
+                val anchor = listState.firstVisibleItemIndex
+                val predictedRows = (abs(velocityY) * 0.25f / 240f).roundToInt().coerceIn(3, 24)
                 val lastIndex = predictivePrefetchRows.lastIndex
                 val targetIndices = if (forward) {
                     (anchor + 1..(anchor + predictedRows).coerceAtMost(lastIndex)).toList()
@@ -172,64 +154,44 @@ fun HomeScreen(
                     (anchor - 1 downTo (anchor - predictedRows).coerceAtLeast(0)).toList()
                 }
                 ThumbnailPrewarmManager.prioritize(
-                    targetIndices.flatMap { predictivePrefetchRows[it].second }.take(120)
+                    targetIndices.flatMap { predictivePrefetchRows[it].second }.take(60)
                 )
                 return Velocity.Zero
             }
         }
     }
 
-    // Also predict while the finger is dragging (not just when a fling starts). Update the priority
-    // window every couple of rows to avoid repeatedly churning the worker queue on every frame.
-    LaunchedEffect(listState, predictivePrefetchRows, predictivePrefetchIndex) {
-        var previousPosition: Pair<Int, Int>? = null
-        var previousAnchor = -1
-        var previousDirection = 1
+    // Immediately pause background prewarmer during active scroll/fling to dedicate 100% CPU/IO to visible viewport
+    LaunchedEffect(listState.isScrollInProgress) {
+        ThumbnailPrewarmManager.isScrollPaused = listState.isScrollInProgress
+    }
 
-        snapshotFlow {
-            val visibleRows = listState.layoutInfo.visibleItemsInfo
-                .mapNotNull { predictivePrefetchIndex[it.key.toString()] }
-                .distinct()
-                .sorted()
-            Triple(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset, visibleRows)
-        }.distinctUntilChanged().collect { (firstIndex, offset, visibleRows) ->
-            if (visibleRows.isEmpty() || predictivePrefetchRows.isEmpty()) {
-                previousPosition = firstIndex to offset
-                return@collect
-            }
+    // Observe row index transitions only (never subpixel offsets) to eliminate per-frame allocations & thread locks
+    LaunchedEffect(listState, predictivePrefetchRows) {
+        var previousIndex = -1
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { firstIndex ->
+                if (predictivePrefetchRows.isEmpty()) return@collect
+                if (previousIndex >= 0 && abs(firstIndex - previousIndex) < 2) return@collect
+                val direction = if (firstIndex >= previousIndex) 1 else -1
+                observedScrollDirection = direction
+                previousIndex = firstIndex
 
-            val direction = previousPosition?.let { previous ->
-                when {
-                    firstIndex > previous.first -> 1
-                    firstIndex < previous.first -> -1
-                    offset > previous.second -> 1
-                    offset < previous.second -> -1
-                    else -> previousDirection
-                }
-            } ?: 1
-            observedScrollDirection = direction
-            val moving = listState.isScrollInProgress
-            val anchor = if (direction > 0) visibleRows.last() else visibleRows.first()
-            val movedEnough = previousAnchor < 0 || abs(anchor - previousAnchor) >= 2
-            if (movedEnough || direction != previousDirection) {
-                val forwardCount = if (moving) 14 else 6
-                val backwardCount = if (moving) 2 else 4
+                val forwardCount = 10
+                val backwardCount = 3
                 val lastIndex = predictivePrefetchRows.lastIndex
                 val targetIndices = if (direction > 0) {
-                    (anchor..(anchor + forwardCount).coerceAtMost(lastIndex)).toList() +
-                        (anchor - 1 downTo (anchor - backwardCount).coerceAtLeast(0)).toList()
+                    (firstIndex..(firstIndex + forwardCount).coerceAtMost(lastIndex)).toList() +
+                        (firstIndex - 1 downTo (firstIndex - backwardCount).coerceAtLeast(0)).toList()
                 } else {
-                    (anchor downTo (anchor - forwardCount).coerceAtLeast(0)).toList() +
-                        (anchor + 1..(anchor + backwardCount).coerceAtMost(lastIndex)).toList()
+                    (firstIndex downTo (firstIndex - forwardCount).coerceAtLeast(0)).toList() +
+                        (firstIndex + 1..(firstIndex + backwardCount).coerceAtMost(lastIndex)).toList()
                 }
                 ThumbnailPrewarmManager.prioritize(
-                    targetIndices.distinct().flatMap { predictivePrefetchRows[it].second }.take(120)
+                    targetIndices.distinct().flatMap { predictivePrefetchRows[it].second }.take(60)
                 )
-                previousAnchor = anchor
-                previousDirection = direction
             }
-            previousPosition = firstIndex to offset
-        }
     }
 
     BoxWithConstraints(
@@ -245,22 +207,20 @@ fun HomeScreen(
                         awaitFirstDown(requireUnconsumed = false)
                         do {
                             val event = awaitPointerEvent()
-                            // Pinch-to-zoom requires 2 or more touches. Single-finger vertical scrolls
-                            // are NEVER consumed or intercepted, preserving native Android system scroll physics,
-                            // fling decay, touch slop, and overscroll on LazyColumn.
-                            if (event.changes.size >= 2) {
-                                val zoomChange = event.calculateZoom()
-                                if (zoomChange != 1f) {
-                                    pinchZoomRemainder *= zoomChange
-                                    if (pinchZoomRemainder < 0.82f) {
-                                        pinchGridColumns = (pinchGridColumns + 1).coerceAtMost(6)
-                                        pinchZoomRemainder = 1f
-                                    } else if (pinchZoomRemainder > 1.22f) {
-                                        pinchGridColumns = (pinchGridColumns - 1).coerceAtLeast(1)
-                                        pinchZoomRemainder = 1f
-                                    }
-                                    event.changes.forEach { it.consume() }
+                            // Single-finger vertical scrolls exit immediately, preserving native 120 FPS
+                            // spline fling physics and touch digitizer velocity tracking.
+                            if (event.changes.size < 2) continue
+                            val zoomChange = event.calculateZoom()
+                            if (zoomChange != 1f) {
+                                pinchZoomRemainder *= zoomChange
+                                if (pinchZoomRemainder < 0.82f) {
+                                    pinchGridColumns = (pinchGridColumns + 1).coerceAtMost(6)
+                                    pinchZoomRemainder = 1f
+                                } else if (pinchZoomRemainder > 1.22f) {
+                                    pinchGridColumns = (pinchGridColumns - 1).coerceAtLeast(1)
+                                    pinchZoomRemainder = 1f
                                 }
+                                event.changes.forEach { it.consume() }
                             }
                         } while (event.changes.any { it.pressed })
                     }

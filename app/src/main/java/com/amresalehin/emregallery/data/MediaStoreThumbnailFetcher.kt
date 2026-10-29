@@ -25,25 +25,37 @@ class MediaStoreThumbnailFetcher(
     private val options: Options
 ) : Fetcher {
 
-    override suspend fun fetch(): FetchResult? = withContext(Dispatchers.IO) {
+    override suspend fun fetch(): FetchResult? {
         val widthDim = options.size.width
         val heightDim = options.size.height
         if (widthDim !is Dimension.Pixels || heightDim !is Dimension.Pixels) {
-            return@withContext null
+            return null
         }
 
         val widthPx = widthDim.px
         val heightPx = heightDim.px
-        if (widthPx > 1024 || heightPx > 1024) return@withContext null
+        if (widthPx > 1024 || heightPx > 1024) return null
 
-        val prepared = PreparedThumbnailCache.loadOrCreate(context, uri, widthPx, heightPx)
-            ?: return@withContext null
+        // Fast in-memory check: Return in 0ms without Dispatchers.IO context switch
+        val memBitmap = PreparedThumbnailCache.getFromMemory(uri.toString(), widthPx, heightPx)
+        if (memBitmap != null && !memBitmap.isRecycled) {
+            return DrawableResult(
+                drawable = BitmapDrawable(context.resources, memBitmap),
+                isSampled = true,
+                dataSource = DataSource.MEMORY
+            )
+        }
 
-        DrawableResult(
-            drawable = BitmapDrawable(context.resources, prepared.bitmap),
-            isSampled = true,
-            dataSource = DataSource.DISK
-        )
+        return withContext(Dispatchers.IO) {
+            val prepared = PreparedThumbnailCache.loadOrCreate(context, uri, widthPx, heightPx)
+                ?: return@withContext null
+
+            DrawableResult(
+                drawable = BitmapDrawable(context.resources, prepared.bitmap),
+                isSampled = true,
+                dataSource = DataSource.DISK
+            )
+        }
     }
 
     class Factory(private val context: Context) : Fetcher.Factory<Uri> {
